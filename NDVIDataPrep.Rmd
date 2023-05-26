@@ -1,0 +1,196 @@
+---
+title: "NDVI Data Preparation"
+output: html_notebook
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ncdf4)
+library(rvest)
+library(stringr)
+library(abind)
+library(purrr)
+options(dplyr.summarise.inform = FALSE) #to avoid grouping warning 
+```
+
+```{r}
+SPEI <- nc_open("Data/spei12.nc")
+
+SPEI_lon <- ncvar_get(SPEI, attributes(SPEI$dim)$names[1])
+SPEI_lat <- ncvar_get(SPEI, attributes(SPEI$dim)$names[2])
+
+nc_close(SPEI)
+```
+
+
+```{r download NDVI function}
+# Define a function to download NDVI data for multiple years and months
+download_NDVI <-
+  function(destination_folder,
+           year_start,
+           year_end,
+           month_start,
+           month_end) {
+    # Define the base URL for the NDVI data
+    url_folder <-
+      "https://www.ncei.noaa.gov/data/land-normalized-difference-vegetation-index/access/"
+    
+    # Loop through the years 1991-2014
+    for (year in year_start:year_end) {
+      # Construct the URL for the current year's data
+      url_folder_year <-
+        paste(url_folder, toString(year), "/", sep = "")
+      
+      # Read the HTML content of the URL using rvest package
+      document <- read_html(url_folder_year)
+      
+      # Extract the links to individual monthly NDVI files
+      links <- document %>% html_elements("a")
+      links <- links %>% html_text2()
+      
+      # Loop through the 12 months
+      for (month in month_start:month_end) {
+        # Construct the date in YYYYMM01 format
+        date <-
+          paste(toString(year),
+                str_pad(month, 2, side = 'left', pad = "0"),
+                "01",
+                sep = "")
+        
+        # Search for the file name corresponding to the current month's data using regular                 expressions
+        file_name <-
+          links[grepl(date, sub(".*_([12][0-9]{7})_.*", "\\1", links))]
+        
+        # Construct the URL for the current month's data and download it
+        url <- paste(url_folder_year, file_name, sep = "")
+        download.file(url, paste(destination_folder, date, ".nc", sep = ""))
+      }
+    }
+  }
+
+```
+
+```{r prepare NDVI function}
+prepare_NDVI <-
+  function(SPEI_lat,
+           SPEI_long,
+           year_start,
+           year_end,
+           month_start,
+           month_end) {
+    # Create an empty matrix to store the final NDVI values
+    NDVI_final <- matrix(nrow = 720, ncol = 360)
+    
+    # Loop through each year
+    for (year in year_start:year_end) {
+      # Print a message to show which year is being processed
+      print(paste("Currently working on year ", toString(year), sep = ""))
+      
+      # Loop through each month
+      for (month in month_start:month_end) {
+        # Construct the date string in the required format
+        date <-
+          paste(toString(year),
+                str_pad(month, 2, side = 'left', pad = "0"),
+                "01",
+                sep = "")
+        
+        # Try to open the netCDF file for the current month
+        NDVI <- tryCatch({
+          nc_open(paste("NDVI/", date, ".nc", sep = ""))
+        },
+        # Catch the error if the nc_open function fails
+        error = function(e) {
+          # Return an error message
+          message(paste(
+            "Error: Failed to open netCDF file of month ",
+            toString(month),
+            sep = ""
+          ))
+          return(NULL)
+        })
+        
+        # If the file could not be opened, return the final NDVI values
+        if (is.null(NDVI)) {
+          return(NDVI_final)
+        }
+        
+        # Extract the NDVI data from the netCDF file and reverse the order of columns
+        NDVI_data <- ncvar_get(NDVI, attributes(NDVI$var)$names[4])
+        
+        NDVI_data <- NDVI_data[, rev(seq_len(ncol(NDVI_data)))]
+        
+        # Extract the latitude and longitude data from the netCDF file and reverse the order of            latitude
+        NDVI_lat <-
+          rev(ncvar_get(NDVI, attributes(NDVI$dim)$names[1]))
+        NDVI_long <- ncvar_get(NDVI, attributes(NDVI$dim)$names[2])
+        
+        nc_close(NDVI)
+        
+        # Convert NDVI_data to a data frame
+        ndvi_df <- data.frame(
+          lat = rep(NDVI_lat, each = length(NDVI_long)),
+          long = rep(NDVI_long, times = length(NDVI_lat)),
+          ndvi = as.vector(NDVI_data)
+        )
+        
+        # Modify SPEI_lat and SPEI_long to include the maximum values
+        SPEI_lat_mod <- c(SPEI_lat - 0.25, 90)
+        SPEI_lon_mod <- c(SPEI_lon - 0.25, 180)
+        
+        # Add SPEI_lat_mod and SPEI_lon_mod to the data frame as new columns
+        ndvi_df <- ndvi_df %>%
+          mutate(
+            SPEI_lat = cut(lat, breaks = SPEI_lat_mod, labels = FALSE),
+            SPEI_lon = cut(long, breaks = SPEI_lon_mod, labels = FALSE)
+          )
+        
+        # Calculate the mean NDVI for each combination of SPEI_lat and SPEI_lon
+        NDVI_temp <- ndvi_df %>%
+          group_by(SPEI_lat, SPEI_lon) %>%
+          summarise(mean_ndvi = mean(ndvi, na.rm = TRUE)) %>% pivot_wider(names_from = SPEI_lat,           values_from = mean_ndvi)
+        
+        ndvi_df[ndvi_df$SPEI_lat == 255 & ndvi_df$SPEI_lon == 343, 3]
+        
+        # Add the NDVI_temp values to the final NDVI matrix
+        NDVI_final <-
+          abind(NDVI_final, NDVI_temp[, 2:361], along = 3)
+      }
+    }
+    return(NDVI_final[, , 2:dim(NDVI_final)[3]])
+  }
+
+```
+
+
+```{r prepare NDVI dataset}
+
+download_NDVI("NDVI/", 1991, 2014, 1, 12)
+
+NDVI_final_1 <- prepare_NDVI(SPEI_lat, SPEI_lon, 1981, 2014, 1, 12)
+```
+
+
+```{r NDVI netCDF file preparation}
+filename = "NDVI.nc"
+
+xvals <- SPEI_lon
+yvals <- SPEI_lat
+nx <- length(xvals)
+ny <- length(yvals)
+lon1 <- ncdim_def("longitude", "degrees_east", xvals)
+lat2 <- ncdim_def("latitude", "degrees_north", yvals)
+time <- ncdim_def("Time", "months", 1:402, unlim = TRUE)
+
+mv <- -999 #missing value to use
+var_temp <-
+  ncvar_def("NDVI", "double", list(lon1, lat2, time), longname = "NDVI dataset", mv)
+
+ncnew <- nc_create(filename, list(var_temp))
+
+ncvar_put(ncnew, var_temp, NDVI, start = c(1, 1, 1))
+
+nc_close(ncnew)
+```
+

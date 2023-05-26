@@ -1,0 +1,1026 @@
+---
+title: 'Drought prediction in continental Italy: an SpVAR approach'
+output:
+  html_document: default
+---
+
+We set the seed for reproducibility and import the necessary libraries and functions.
+
+```{r package import,warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.keep='all'}
+set.seed(123)
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(systemfit)
+  library(plm)
+  library(ncdf4)
+  library(abind)
+  library(ggmap)
+  library(Rmpfr)
+  library(gridExtra)
+  library(geometry)
+  library(caret)
+  library(cowplot)
+  library(forecast)
+})
+
+setwd(
+  "/Users/enrico/Library/Mobile Documents/com~apple~CloudDocs/Documents/Carriera/Scuola:Università/Bocconi Master/Thesis"
+)
+
+source("functions.r")
+```
+
+We read the SPEI data and prepare it.
+
+```{r SPEI data read}
+# Open the netCDF file with monthly SPEI data
+SPEI <- nc_open("Data/spei12.nc")
+
+# Get the data from the first variable
+SPEI_data <- ncvar_get(SPEI, attributes(SPEI$var)$names[1])
+
+# Get the longitude and latitude values
+SPEI_lon <- ncvar_get(SPEI, attributes(SPEI$dim)$names[1])
+SPEI_lat <- ncvar_get(SPEI, attributes(SPEI$dim)$names[2])
+
+# Close the file
+nc_close(SPEI)
+
+# Subset the data for the relevant time steps
+SPEI_last_year<-SPEI_data[,,1367:1368]
+SPEI_relevant_years <- SPEI_data[, , 967:1368]
+```
+
+We read the SMoist data and prepare it.
+
+```{r SMoist data read}
+# Open the netCDF file with Soil Moisture data
+SMoist <- nc_open("Data/SoilMoisture.nc")
+
+# Get the data from the first variable
+SMoist_data <- ncvar_get(SMoist, attributes(SMoist$var)$names[1])
+
+# Order the data with the same ordering as the SPEI 
+SMoist_ordered <- SMoist_data[361:720, ,]
+SMoist_ordered <-
+  abind(SMoist_ordered, SMoist_data[1:360, ,], along = 1)
+
+# Get the longitude and latitude values
+SMoist_lon <- ncvar_get(SMoist, attributes(SMoist$dim)$names[1])
+SMoist_lat <- ncvar_get(SMoist, attributes(SMoist$dim)$names[3])
+
+# Print a message to check if the longitudes and latitudes match with the ones from SPEI
+print(paste(
+  "Check on longitudes",
+  toString(all(SMoist_lon - 180 == SPEI_lon)),
+  "check on latitudes",
+  toString(all(SMoist_lat == SPEI_lat))
+))
+
+# Close the file
+nc_close(SMoist)
+
+# Subset the data for the relevant time steps
+SMoist_last_year <- SMoist_ordered[, , 659:660]
+SMoist_relevant_years <- SMoist_ordered[, , 259:660]
+```
+
+We read the NDVI data and prepare it.
+
+```{r NDVI netCDF file opening}
+# Open the netCDF file with NDVI data
+NDVI_read <- nc_open("Data/NDVI.nc")
+
+# Get the data from the first variable
+NDVI <- ncvar_get(NDVI_read, attributes(NDVI_read$var)$names[1])
+
+# Get the longitude and latitude values
+NDVI_lon <- ncvar_get(NDVI_read, attributes(NDVI_read$dim)$names[1])
+NDVI_lat <- ncvar_get(NDVI_read, attributes(NDVI_read$dim)$names[2])
+
+# Print a message to check if the longitudes and latitudes match with the ones from SPEI
+print(paste(
+  "Check on longitudes",
+  all(NDVI_lon == SPEI_lon),
+  "check on latitudes",
+  all(NDVI_lat == SPEI_lat)
+))
+
+# Close the file
+nc_close(NDVI_read)
+
+# Subset the data for the relevant time steps
+NDVI_last_year <- NDVI[, , 401:402]
+```
+
+We read the PET data and prepare it.
+
+```{r PET}
+# Open the first netCDF file with monthly PET data and store it
+PET <- nc_open("Data/cru_ts4.03.1981.1990.pet.dat.nc")
+PET_data <- ncvar_get(PET, attributes(PET$var)$names[1])
+
+# Subset the data for the relevant time steps
+PET_data <- PET_data[, , 7:120]
+
+# Close the file
+nc_close(PET)
+
+# Open the second netCDF file with monthly PET data and store it
+PET <- nc_open("Data/cru_ts4.03.1991.2000.pet.dat.nc")
+PET_data_2 <- ncvar_get(PET, attributes(PET$var)$names[1])
+
+# Close the file
+nc_close(PET)
+
+# Open the third netCDF file with monthly PET data and store it
+PET <- nc_open("Data/cru_ts4.03.2001.2010.pet.dat.nc")
+PET_data_3 <- ncvar_get(PET, attributes(PET$var)$names[1])
+
+# Close the file
+nc_close(PET)
+
+# Open the fourth netCDF file with monthly PET data and store it
+PET <- nc_open("Data/cru_ts4.03.2011.2018.pet.dat.nc")
+PET_data_4 <- ncvar_get(PET, attributes(PET$var)$names[1])
+
+# Subset the data for the relevant time steps
+PET_data_4 <- PET_data_4[, , 1:48]
+
+# Get the longitude and latitude values
+PET_lon <- ncvar_get(PET, attributes(PET$dim)$names[1])
+PET_lat <- ncvar_get(PET, attributes(PET$dim)$names[2])
+
+# Print a message to check if the longitudes and latitudes match with the ones from SPEI
+print(paste(
+  "Check on longitudes",
+  all(PET_lon == SPEI_lon),
+  "check on latitudes",
+  all(PET_lat == SPEI_lat)
+))
+
+# Close the file
+nc_close(PET)
+
+# Merge the 4 PET datasets together
+PET <- array(0, dim = c(720, 360, 402))
+PET[, , ] <- c(PET_data, PET_data_2, PET_data_3, PET_data_4)
+```
+
+We read the PRE (Monthly Precipitation) data and prepare it.
+
+```{r PRE}
+# Open the first netCDF file with monthly Precipitation dataand store it
+PRE <- nc_open("Data/cru_ts4.03.1981.1990.pre.dat.nc")
+PRE_data <- ncvar_get(PRE, attributes(PRE$var)$names[1])
+
+# Subset the data for the relevant time steps 
+PRE_data<-PRE_data[,,7:120]
+
+# Close the file
+nc_close(PRE)
+
+# Open the second netCDF file with monthly Precipitation data and store it
+PRE<-nc_open("Data/cru_ts4.03.1991.2000.pre.dat.nc")
+PRE_data_2 <- ncvar_get(PRE, attributes(PRE$var)$names[1])
+
+# Close the file
+nc_close(PRE)
+
+# Open the third netCDF file with monthly Precipitation data and store it
+PRE<-nc_open("Data/cru_ts4.03.2001.2010.pre.dat.nc")
+PRE_data_3 <- ncvar_get(PRE, attributes(PRE$var)$names[1])
+
+# Close the file
+nc_close(PRE)
+
+# Open the fourth netCDF file with monthly Precipitation data and store it
+PRE<-nc_open("Data/cru_ts4.03.2011.2018.pre.dat.nc")
+PRE_data_4 <- ncvar_get(PRE, attributes(PRE$var)$names[1])
+
+# Subset the data for the relevant time steps
+PRE_data_4<-PRE_data_4[,,1:48]
+
+# Get the longitude and latitude values
+PRE_lon <- ncvar_get(PRE, attributes(PRE$dim)$names[1])
+PRE_lat <- ncvar_get(PRE, attributes(PRE$dim)$names[2])
+
+# Print a message to check if the longitudes and latitudes match with the ones from SPEI
+print(paste(
+  "Check on longitudes",
+  all(PRE_lon == SPEI_lon),
+  "check on latitudes",
+  all(PRE_lat == SPEI_lat)
+))
+
+# Close the file
+nc_close(PRE)
+
+# Merge the 4 Precipitation datasets together
+PRE<-array(0, dim=c(720,360,402))
+PRE[,,]<-c(PRE_data, PRE_data_2,PRE_data_3,PRE_data_4)
+
+```
+
+We clean-up the workspace by removing unnecessary objects.
+
+```{r clean-up}
+# Remove the variables SPEI and SMoist from the workspace
+rm(SPEI, SMoist)
+
+# Rename the variables SPEI and Smoist variables
+SPEI <- SPEI_relevant_years
+SMoist <- SMoist_relevant_years
+
+# Assign the variables lats and lons to the latitude and longitude of SPEI
+lats <- SPEI_lat
+lons <- SPEI_lon
+
+# Remove variables that won't be used again from the workspace
+rm(
+  SPEI_relevant_years,
+  SMoist_relevant_years,
+  SPEI_lat,
+  SMoist_lat,
+  SPEI_lon,
+  SMoist_lon,
+  SMoist_ordered,
+  NDVI_lon,
+  NDVI_lat,
+  SPEI_data,
+  SMoist_data,
+  NDVI_read,
+  PET_lat,
+  PET_lon,
+  PRE_lat,
+  PRE_lon,
+  PET_data,
+  PET_data_2,
+  PET_data_3,
+  PET_data_4,
+  PRE_data,
+  PRE_data_2,
+  PRE_data_3,
+  PRE_data_4
+)
+```
+
+We create arrays containing the latitudes and longitudes of the region (Continental Italy) we'll analyze.
+
+```{r Latitudes long}
+reg_latitudes <-
+  c(
+    46.75,
+    46.25,
+    46.25,
+    45.75,
+    45.25,
+    44.75,
+    44.25,
+    43.75,
+    43.75,
+    43.25,
+    42.75,
+    42.25,
+    41.75,
+    41.25,
+    40.75,
+    40.25,
+    39.75,
+    39.25,
+    38.75,
+    38.25
+  )
+reg_long_min <-
+  c(
+    10.25,
+    8.25,
+    9.25,
+    6.75,
+    6.75,
+    6.75,
+    6.75,
+    7.25,
+    10.25,
+    10.25,
+    10.75,
+    11.75,
+    12.25,
+    13.25,
+    14.25,
+    15.25,
+    15.75,
+    16.25,
+    16.25,
+    15.75
+  )
+
+reg_long_max <-
+  c(
+    12.75,
+    8.25,
+    13.75,
+    13.75,
+    12.25,
+    12.25,
+    12.25,
+    7.75,
+    13.75,
+    13.75,
+    14.25,
+    14.25,
+    15.75,
+    16.75,
+    17.75,
+    18.25,
+    16.25,
+    16.75,
+    16.75,
+    16.25
+  )
+```
+
+We now scale the data and then format it as needed.
+
+```{r data preparation}
+test_df <- create_test_df(reg_latitudes,
+                          reg_long_min,
+                          reg_long_max,
+                          lats,
+                          lons,
+                          SPEI,
+                          SMoist,
+                          NDVI)
+
+#We store the scaling factors for future re-use
+scale_SMoist <- sd(test_df$SMoist)
+scale_NDVI <- sd(test_df$NDVI, na.rm = TRUE)
+#Since we don't scale the SPEI value we set the scale factor to 1
+scale_SPEI <- 1
+
+#We scale the data
+test_df$SMoist <- (test_df$SMoist) / (scale_SMoist)
+test_df$NDVI <- (test_df$NDVI) / (scale_NDVI)
+
+#We create a dataframe for each of the variables
+test_df_spei <-
+  data.frame(split(test_df$SPEI, as.factor(test_df$index)))
+test_df_ndvi <-
+  data.frame(split(test_df$NDVI, as.factor(test_df$index)))
+test_df_smoist <-
+  data.frame(split(test_df$SMoist, as.factor(test_df$index)))
+```
+
+We create two other objects needed in the future analysis (the regions indexes and the weights matrix).
+
+```{r other objects creation}
+#index_pairs contains the Longitudes and Latitudes indexes of all the regions under consideration
+index_pairs <- unique(test_df$index)
+
+#weights is the connectivity matrix
+weights <- prepare_weights(index_pairs, lats, lons)
+```
+
+# Unit Root testing
+
+We now perform unit root testing as described in Section 3.3. We first look at the estimated $\lambda$ for the SPEI variable on our data.
+
+```{r lambda spei}
+compute_lambda(test_df_spei, weights)
+```
+
+We then look at the estimated $\lambda$ for the SMoist variable.
+
+```{r lambda smoist}
+compute_lambda(test_df_smoist, weights)
+```
+
+We also look at the estimated $\lambda$ for the NDVI variable.
+
+```{r lambda ndvi}
+compute_lambda(test_df_ndvi, weights)
+```
+
+Finally, we perform a Monte Carlo simulation to obtain the critical values of our test.
+
+```{r lambda mc, cache=TRUE}
+lambda_mc <-
+  mc_critical_values(10000, 139, 500, weights, 3061792, FALSE)
+```
+
+# Model fitting
+
+We fit our model using SUR (implemented in the systemfit package) after having prepared the data for it.
+
+```{r SpVAR fit,warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.keep='all'}
+spvar_df <-
+  prepare_spvar_df(test_df, test_df_spei, test_df_smoist, test_df_ndvi, lags =
+                     1)
+
+
+spvar_fit <-
+  systemfit(
+    c(
+      eqspei = spei ~ 0 + . -spei -ndvi -smoist,
+      eqndvi = ndvi ~ 0 + . -spei -ndvi -smoist,
+      eqsmoist = smoist ~ 0 + . -spei -ndvi -smoist
+    ),
+    data = spvar_df,
+    method = "SUR"
+  )
+```
+
+We also fit a model with two temporal lags to compare them.
+
+```{r 2 lagged SpVAR fit,warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.keep='all'}
+spvar_df_2 <-
+  prepare_spvar_df(test_df, test_df_spei, test_df_smoist, test_df_ndvi, lags =
+                     2)
+
+spvar_fit_2 <-
+  systemfit(
+    c(
+      eqspei = spei ~ 0 + . -spei -ndvi -smoist,
+      eqndvi = ndvi ~ 0 + . -spei -ndvi -smoist,
+      eqsmoist = smoist ~ 0 + . -spei -ndvi -smoist
+    ),
+    data = spvar_df_2,
+    method = "SUR"
+  )
+```
+
+To make this comparison and choose which one to use we use BIC.
+
+```{r Compare SpVAR fit}
+print(paste( "The BIC of the first model is", BIC(spvar_fit)))
+print(paste( "The BIC of the second model is", BIC(spvar_fit_2)))
+```
+
+Since the BIC of the first model is substantially lower we choose it. We now look at the coefficients of this chosen model.
+
+```{r SpVAR coefficients, warning=FALSE}
+summary(spvar_fit)
+```
+
+## Predictive performance
+
+To evaluate the predictive capabilities of our model, we fit it on the first 300 months of data. We also fit 2 simpler models (VAR and SAR) with which we will compare ours. More details on this are in Section 4.2.
+
+```{r short term models fitting,warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.keep='all'}
+# Prepare the dataset containing only the first 300 months
+df_short <-
+  prepare_spvar_df(test_df, test_df_spei, test_df_smoist, test_df_ndvi, T =
+                     301)
+
+spvar_fit_short <-
+  systemfit(
+    c(
+      eqspei = spei ~ 0 + . -spei -ndvi -smoist,
+      eqndvi = ndvi ~ 0 + . -spei -ndvi -smoist,
+      eqsmoist = smoist ~ 0 + . -spei -ndvi -smoist
+    ),
+    data = df_short,
+    method = "SUR"
+  )
+
+var_fit_short <-
+  systemfit(
+    c(
+      eqspei = spei ~ 0 + . -spei -ndvi -smoist -sp_spei -sp_smoist -sp_ndvi,
+      eqndvi = ndvi ~ 0 + . -spei -ndvi -smoist -sp_spei -sp_smoist -sp_ndvi,
+      eqsmoist = smoist ~ 0 + . -spei -ndvi -smoist -sp_spei -sp_smoist -sp_ndvi
+    ),
+    data = df_short,
+    method = "SUR"
+  )
+
+sar_fit_short <-
+  systemfit(
+    c(
+      eqspei = spei ~ 0 + . -spei -ndvi -smoist -sp_smoist -sp_ndvi -ndvi_lag -smoist_lag,
+      eqndvi = ndvi ~ 0 + . -spei -ndvi -smoist -sp_smoist -sp_spei -spei_lag -smoist_lag,
+      eqsmoist = smoist ~ 0 + . -spei -ndvi -smoist -sp_spei -sp_ndvi -ndvi_lag -spei_lag
+    ),
+    data = df_short,
+    method = "SUR"
+  )
+```
+
+We now look at the adjusted R\^2 of the three models for the SPEI equation.
+
+```{r adj r squared}
+print(paste("The adjusted R Squared of the SpVAR is:",adj_r2(spvar_fit_short$eq[[1]])))
+print(paste("The adjusted R Squared of the VAR is:",adj_r2(var_fit_short$eq[[1]])))
+print(paste("The adjusted R Squared of the SAR is:",adj_r2(sar_fit_short$eq[[1]])))
+```
+
+We subset the data as needed for making predictions and set all the missing values to 0 so that they don't impact our predictions.
+
+```{r missing to 0}
+data_pred_short <- spvar_df[((299 * 139) + 1):dim(spvar_df)[1],]
+
+data_pred_short[is.na(data_pred_short)] = 0
+```
+
+We now look at predictive performances of the three models using the $SMAPE$ and the $RMSE$.
+We start by comparing the error rates using the three models for predictions up to a year in advance
+
+```{r up to 12 months prediction comparison, cache=TRUE}
+for (i in c(1, 3, 6, 12)) {
+  print(paste(i, "steps ahead:"))
+  spvar_err <-
+    compute_pred_steps(102 - i, i, spvar_fit_short, data_pred_short)
+  print(paste("The SMAPE and the RMSE are as follows for the SpVAR:", spvar_err[[2]],spvar_err[[1]]))
+  var_err <-
+    compute_pred_steps(102 - i, i, var_fit_short, data_pred_short, i+1)
+  print(paste("The SMAPE and the RMSE are as follows for the VAR:", var_err[[2]],var_err[[1]] ))
+  sar_err <-
+    compute_pred_steps(102 - i, i, sar_fit_short, data_pred_short, i)
+  print(paste("The SMAPE and the RMSE are as follows for the SAR:", sar_err[[2]], sar_err[[1]]))
+}
+```
+
+We check if the differences are significant using the Diebold-Mariano test.
+
+```{r dm test, cache=TRUE}
+for (i in c(1, 3, 6, 12)) {
+  spvar_res <-
+    compute_pred_steps(102 - i,
+                       i,
+                       spvar_fit_short,
+                       data_pred_short,
+                       value = "res")
+  sar_res <-
+    compute_pred_steps(102 - i,
+                       i,
+                       sar_fit_short,
+                       data_pred_short,
+                       i,
+                       value = "res")
+  var_res <-
+    compute_pred_steps(102 - i,
+                       i,
+                       var_fit_short,
+                       data_pred_short,
+                       i + 1,
+                       value = "res")
+  spvar_res <- spvar_res[2:((102 - i) * 44)]
+  sar_res <- sar_res[2:((102 - i) * 44)]
+  var_res <- var_res[2:((102 - i) * 44)]
+  print(dm.test(spvar_res, sar_res, h = i))
+  print(dm.test(spvar_res, var_res, h = i))
+}
+```
+
+We now fit the models on a shorter data-set (containing only the first 150 months) to see the performance on longer term predictions (60 and 120-months ahead).
+
+```{r fit shorter models,warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.keep='all'}
+# Prepare the dataset containing only the first 150 months
+df_super_short <-
+  prepare_spvar_df(test_df, test_df_spei, test_df_smoist, test_df_ndvi, T =
+                     151)
+
+
+spvar_fit_super_short <-
+  systemfit(
+    c(
+      eqspei = spei ~ 0 + . -spei -ndvi -smoist,
+      eqndvi = ndvi ~ 0 + . -spei -ndvi -smoist,
+      eqsmoist = smoist ~ 0 + . -spei -ndvi -smoist
+      ),
+    data = df_super_short,
+    method = "SUR"
+  )
+
+
+var_fit_super_short <-
+  systemfit(
+    c(
+      eqspei = spei ~ 0 + . -spei -ndvi -smoist -sp_spei -sp_ndvi -sp_smoist,
+      eqndvi = ndvi ~ 0 + . -spei -ndvi -smoist -sp_spei -sp_ndvi -sp_smoist,
+      eqsmoist = smoist ~ 0 + . -spei -ndvi -smoist -sp_spei -sp_ndvi -sp_smoist
+    ),
+    data = df_super_short,
+    method = "SUR"
+  )
+
+sar_fit_super_short <-
+  systemfit(
+    c(
+      eqspei = spei ~ 0 + . -spei -ndvi -smoist -sp_smoist -sp_ndvi -ndvi_lag -smoist_lag,
+      eqndvi = ndvi ~ 0 + . -spei -ndvi -smoist -sp_smoist -sp_spei -spei_lag -smoist_lag,
+      eqsmoist = smoist ~ 0 + . -spei -ndvi -smoist -sp_spei -sp_ndvi -ndvi_lag -spei_lag
+    ),
+    data = df_super_short,
+    method = "SUR"
+  )
+```
+
+We again subset the data as needed and set all the missing values to 0 so that they don’t impact our predictions.
+
+```{r missing to 0 short}
+data_pred_super_short <- spvar_df[((149 * 139) + 1):dim(spvar_df)[1],]
+
+data_pred_super_short[is.na(data_pred_super_short)] = 0
+```
+
+Finally, we check the performances on these longer-term predictions and check if the differences between models are significant with the Diebold-Mariano test.
+
+```{r long-term predictions, cache=TRUE}
+for (i in c(60, 120)) {
+  print(paste(i, "steps ahead:"))
+  spvar_err <-
+    compute_pred_steps(252 - i, i, spvar_fit_super_short, data_pred_super_short)
+  print(paste(
+    "The SMAPE and RMSE are as follows for the SpVar",
+    spvar_err[[2]],
+    spvar_err[[1]]
+  ))
+  var_err <-
+    compute_pred_steps(252 - i, i, var_fit_super_short, data_pred_super_short, i+1)
+  print(paste(
+    "The SMAPE and RMSE are as follows for the VAR",
+    var_err[[2]],
+    var_err[[1]]
+  ))
+  sar_err <-
+    compute_pred_steps(252 - i, i, sar_fit_super_short, data_pred_super_short, i)
+  print(paste(
+    "The SMAPE and RMSE are as follows for the SAR",
+    sar_err[[2]],
+    sar_err[[1]]
+  ))
+  spvar_res <-
+    compute_pred_steps(252 - i,
+                       i,
+                       spvar_fit_super_short,
+                       data_pred_super_short,
+                       value = "res")
+  sar_res <-
+    compute_pred_steps(252 - i,
+                       i,
+                       sar_fit_super_short,
+                       data_pred_super_short,
+                       i,
+                       value = "res")
+  var_res <-
+    compute_pred_steps(252 - i,
+                       i,
+                       var_fit_super_short,
+                       data_pred_super_short,
+                       i + 1,
+                       value = "res")
+  spvar_res <- spvar_res[2:((252 - i) * 139)]
+  sar_res <- sar_res[2:((252 - i) * 139)]
+  var_res <- var_res[2:((252 - i) * 139)]
+  print(dm.test(spvar_res, sar_res), h = i)
+  print(dm.test(spvar_res, var_res), h = i)
+}
+
+```
+
+# Impulse Response Functions
+
+We now look at impulse response functions starting from same region IRFs.
+
+```{r northeast, fig.height =6, fig.width =8, cache=TRUE, warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.keep='all', cache=TRUE}
+reg_2 <- 106
+t_irf <- 100
+
+quantiles <- bootstrap(t_irf, reg_2, spvar_fit, spvar_df, 1000)
+multiplot_irf_sameregion(spvar_fit, spvar_df, reg_2, 100, quantiles)
+```
+
+We now look at the IRF in neighbouring regions when shocking a region having transitional climate.
+
+```{r north east map, fig.height =10, fig.width =9, warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.keep='all'}
+plot <- multiplot_irf_all(spvar_fit, 100, reg_2, plot_all = FALSE)
+
+map <- multiplot_irf_map(spvar_fit, index_pairs, test_df, 50, reg_2, 20)
+map[[1]] <-
+  map[[1]] + theme(plot.margin = unit(c(
+    b = 0.3,
+    l = 0,
+    t = 0.3,
+    r = 0
+  ), "cm"))
+map[[2]] <-
+  map[[2]] + theme(plot.margin = unit(c(
+    b = 0.3,
+    l = 0,
+    t = 0.3,
+    r = 0
+  ), "cm"))
+map[[3]] <-
+  map[[3]] + theme(plot.margin = unit(c(
+    b = 0.3,
+    l = 0,
+    t = 0.3,
+    r = 0
+  ), "cm"))
+
+
+grid.arrange(
+  plot[[1]],
+  map[[1]],
+  plot[[2]],
+  map[[2]],
+  plot[[3]],
+  map[[3]],
+  nrow = 3,
+  ncol = 2,
+  widths = c(1, 1.1)
+)
+```
+
+Finally, we plot the IRFs for neighbouring regions when shocking regions with alpine and Mediterranean climate. 
+
+```{r south, fig.height =8, fig.width =8}
+reg_1 <- 19
+reg_3 <- 137
+
+plot_1 <- multiplot_irf_all(spvar_fit, 75, reg_1, plot_all = FALSE)
+plot_2 <- multiplot_irf_all(spvar_fit, 75, reg_3, plot_all = FALSE)
+
+grid.arrange(plot_1[[1]], plot_2[[1]],   plot_1[[2]], plot_2[[2]],
+             plot_1[[3]], plot_2[[3]],
+             ncol = 2)
+```
+
+
+# Other plots
+
+The following plots the mean monthly precipitations and the average PET for each region.
+
+```{r, fig.width=8, fig.height=3, warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.keep='all', cache = TRUE}
+# Prepare a dataframe for plotting
+plot_df <-
+  create_plot_df(1,
+                 reg_latitudes ,
+                 reg_long_min,
+                 reg_long_max,
+                 lats,
+                 lons,
+                 SPEI,
+                 NDVI,
+                 SMoist)
+
+# Compute the mean precipitation and PET and store them in the dataframe
+for (i in 1:139) {
+  lon_ind <- as.numeric(strsplit(index_pairs[i], ",")[[1]][2])
+  lat_ind <- as.numeric(strsplit(index_pairs[i], ",")[[1]][1])
+  plot_df[plot_df$lat_ind == lat_ind &
+            plot_df$lon_ind == lon_ind, 5] <-
+    mean(PET[lon_ind, lat_ind, 6:402])
+  plot_df[plot_df$lat_ind == lat_ind &
+            plot_df$lon_ind == lon_ind, 6] <-
+    mean(PRE[lon_ind, lat_ind, 6:402])
+}
+
+#Duplicate the dataframe
+plot_df_2 <- plot_df
+
+#Rename a column for plotting
+colnames(plot_df_2)[5] <- "weights"
+colnames(plot_df)[6] <- "weights"
+
+plot_1 <-
+  create_plot(plot_df_2,
+              var = "Mean PET", scale_fixed = TRUE)
+
+plot_2 <-
+  create_plot(plot_df,
+              var = "Mean PRE", scale_fixed = TRUE)
+
+
+grid.arrange(plot_1, plot_2, ncol = 2)
+```
+
+The following plots the evolution of PET and PRE (monthly precipitations) in certain regions (one for each climatic area) to highlight the differences between them.
+
+```{r, fig.width=8, fig.height=4, warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.keep='all', cache = TRUE}
+# Prepare a dataframe with the data
+test_df_pet <- create_test_df(reg_latitudes,
+                              reg_long_min,
+                              reg_long_max,
+                              lats,
+                              lons,
+                              PET,
+                              PRE,
+                              SPEI)
+
+# Rename relevant columns
+names(test_df_pet)[6] <- "PET"
+names(test_df_pet)[7] <- "PRE"
+
+plot_1_pre <-
+  ggplot(data = test_df_pet[test_df_pet$index == index_pairs[reg_1] |
+                              test_df_pet$index == index_pairs[reg_2] |
+                              test_df_pet$index == index_pairs[reg_3], ]) +
+  geom_smooth(aes(x = month, y = PET, color = index)) +
+  guides(colour = "none") +
+  scale_color_manual(
+    name = "Climate",
+    labels = c("Mediterranean", "Transitional", "Alpine"),
+    values = c("274,384",  "271,384", "262,392")
+  ) + labs(x = "Months")
+
+
+plot_2_pre <-
+  ggplot(data = test_df_pet[test_df_pet$index == index_pairs[reg_1] |
+                              test_df_pet$index == index_pairs[reg_2] |
+                              test_df_pet$index == index_pairs[reg_3],]) +
+  geom_smooth(aes(x = month, y = PRE, color = index)) + scale_color_manual(
+    name = "Climate",
+    labels = c("Mediterranean", "Transitional", "Alpine"),
+    values = c("274,384", "271,384", "262,392")
+  ) + labs(x = "Months")
+
+grid.arrange(plot_1_pre, plot_2_pre, ncol = 2, widths = c(0.9, 1.3))
+```
+
+The following plots the region under consideration (Continental Italy) and how we divide it to exemplify some concepts of spatial analysis together with the weighting scheme we use.
+
+```{r Regions plot, fig.height =4, fig.width =8, warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.keep='all', cache=TRUE}
+# Prepare a plot showcasing the region under consideration
+plot_df<-create_plot_df(1,reg_latitudes, reg_long_min, reg_long_max, lats, lons, SPEI, SMoist, NDVI)
+reg_plot <- qmplot(
+  y = lat_plot,
+  x = lon_plot,
+  data = plot_df,
+  geom = "blank",
+  maptype = "toner-background",
+  zoom = 7
+) +
+  geom_rect(
+    aes(
+      ymin = lat_min,
+      ymax = lat_max,
+      xmin = lon_min,
+      xmax = lon_max,
+      alpha = 0.01,
+      color = "white",
+      fill = "grey"
+    )
+  ) + scale_alpha_continuous(guide = "none") +
+  scale_color_discrete(guide = "none", type = "white") +
+  scale_fill_discrete(guide = "none", type = "grey") +
+  annotate(
+    "text",
+    x = 12.75,
+    y = 46.75,
+    label = "B",
+    size = 4,
+    color = "black"
+  ) +
+  annotate(
+    "text",
+    x = 11.75,
+    y = 45.25,
+    label = "A",
+    size = 4,
+    color = "black"
+  ) +
+  annotate(
+    "text",
+    x = 15.75,
+    y = 40.75,
+    label = "C",
+    size = 4,
+    color = "black"
+  )
+
+# Prepare a plot showcasing the weighting scheme
+plot_weights <- create_plot_df_weights(weights[reg_2,])
+weight_plot <- create_plot(plot_weights, var = "Weights")
+reg_plot <-
+  reg_plot + theme(plot.margin = unit(c(0, 0.75, 0, 0), "cm"))
+grid.arrange(reg_plot,
+             weight_plot,
+             ncol = 2,
+             widths = c(0.87, 1))
+```
+
+The following plots the distribution of $\lambda$ under the first and tenth unit root test
+
+```{r lambda mc plot, fig.height =4, fig.width =8, warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.keep='all', cache = TRUE}
+lambda_first_test <- tibble(x = lambda_mc[1:10000, ])
+lambda_tenth_test <- tibble(x = lambda_mc[90001:100000, ])
+
+hist1 <-
+  ggplot(data = lambda_first_test) + geom_histogram(
+    aes(x = x),
+    binwidth = 0.0005,
+    color = "black",
+    fill = "black"
+  ) + labs(x = "Lambda in test 1", y = "Count") +
+  geom_vline(aes(xintercept = quantile(x, probs = 0.05)), color = "red") +
+  scale_y_continuous(limits = c(0, 570))
+
+hist2 <-
+  ggplot(data = lambda_tenth_test) + geom_histogram(
+    aes(x = x),
+    binwidth = 0.0005,
+    color = "black",
+    fill = "black"
+  ) + labs(x = "Lambda in test 10", y = NULL) +
+  scale_y_continuous(limits = c(0, 570), guide = "none") +
+  geom_vline(aes(xintercept = quantile(x, probs = 0.05)), color = "red")
+
+
+grid.arrange(hist1, hist2, ncol = 2, widths = c(1.2, 1))
+```
+
+The following plots the number of droughts of each type in the 402 months under consideration.
+
+```{r, fig.width=8, fig.height=3, warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.keep='all', cache=TRUE}
+plots_droughts <-
+  long_term_prediction_plot(
+    test_df_spei[1:402,], plot="initial"
+  )
+```
+
+The following plots the predicted number of droughts in the second 201 periods of the period under consideration (below) against the actual number of them in the data (above). Note that we use a model fit only on the first 201 months.
+
+```{r, fig.width=8, fig.height=6, warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.keep='all', cache=TRUE}
+# Prepare the data
+test_df_201<- test_df[((139 * 199) + 1):(139 * 201), ]
+test_df_201$month <- c(rep(1, times = 139), rep(2, times = 139))
+test_df_201_spei <- test_df_spei[200:201, ]
+test_df_201_ndvi <- test_df_ndvi[200:201, ]
+test_df_201_smoist <- test_df_smoist[200:201, ]
+
+# Fit a model on the first 201 periods
+spvar_df_201 <- spvar_df[1:(201 * 139), ]
+spvar_fit_201 <-
+  systemfit(
+    c(
+      eqspei = spei ~ 0 + . - spei - ndvi - smoist,
+      eqndvi = ndvi ~ 0 + . - spei - ndvi - smoist,
+      eqsmoist = smoist ~ 0 + . - spei - ndvi - smoist
+    ),
+    data = spvar_df_201,
+    method = "SUR"
+  )
+
+# Create the plot
+plots_droughts_201 <-
+  long_term_prediction_plot(
+    test_df_spei[201:402, ],
+    test_df_201,
+    test_df_201_spei,
+    test_df_201_smoist,
+    test_df_201_ndvi,
+    t_pred = 201,
+    spvar_fit = spvar_fit_201
+  )
+```
+
+The following plots the predicted number of droughts in the next 402 periods (the 402 months after those covered by the dataset, i.e. starting from January 2014).
+
+```{r, fig.width=8, fig.height=3, warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.keep='all', cache=TRUE}
+# Create a table with the data of the last 2 years
+test_df_last_year <- create_test_df(
+  reg_latitudes,
+  reg_long_min,
+  reg_long_max,
+  lats,
+  lons,
+  SPEI_last_year,
+  SMoist_last_year,
+  NDVI_last_year
+)
+
+# Subset the data
+test_df_last_year <- test_df_last_year[1:278, ]
+
+#Create a separate df for each variable
+test_df_last_year_spei <-
+  data.frame(split(test_df_last_year$SPEI, as.factor(test_df_last_year$index)))
+test_df_last_year_ndvi <-
+  data.frame(split(test_df_last_year$NDVI, as.factor(test_df_last_year$index)))
+test_df_last_year_smoist <-
+  data.frame(split(
+    test_df_last_year$SMoist,
+    as.factor(test_df_last_year$index)
+  ))
+
+
+plots_droughts_future <-
+  long_term_prediction_plot(
+    test_df_spei[201:402, ],
+    test_df_last_year,
+    test_df_last_year_spei,
+    test_df_last_year_smoist,
+    test_df_last_year_ndvi,
+    t_pred = 402,
+    spvar_fit = spvar_fit,
+    plot = "future"
+  )
+```
+
+
+
